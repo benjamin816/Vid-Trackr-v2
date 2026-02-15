@@ -29,12 +29,14 @@ import SettingsModal from './components/SettingsModal.tsx';
  * PRODUCTION TEAM CONFIG
  * Only modify SPREADSHEET_ID here to change the destination sheet for the entire team.
  */
-const SPREADSHEET_ID = "1W9216uzRoQOsmks9xl5v2d8U3dSzeveiUduTZ63dkjk";
-const CLIENT_ID = "979572069887-6c96876re4v9udofbpqbfmqjru2q91q3.apps.googleusercontent.com";
+const SPREADSHEET_ID = '1W9216uzRoQOsmks9xl5v2d8U3dSzeveiUduTZ63dkjk';
+const CLIENT_ID = '979572069887-6c96876re4v9udofbpqbfmqjru2q91q3.apps.googleusercontent.com';
 const DISCOVERY_DOCS = [
   'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
   'https://sheets.googleapis.com/$discovery/rest?version=v4',
 ];
+
+// NOTE: Keep scopes minimal.
 const SCOPES =
   'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
@@ -45,7 +47,20 @@ type SyncStatus =
   | 'syncing'
   | 'error'
   | 'unauthorized'
-  | 'auth_fail';
+  | 'auth_fail'
+  | 'init_timeout'
+  | 'init_missing_scripts'
+  | 'init_failed';
+
+// Allow using browser gapi/google without TS errors
+declare global {
+  interface Window {
+    gapi: any;
+    google: any;
+  }
+  const gapi: any;
+  const google: any;
+}
 
 const App: React.FC = () => {
   // --- Check for missing Spreadsheet ID ---
@@ -57,7 +72,8 @@ const App: React.FC = () => {
         </div>
         <h1 className="text-2xl font-bold mb-2">Configuration Error</h1>
         <p className="text-slate-400 text-center max-w-md mb-8">
-          The team <strong>SPREADSHEET_ID</strong> is missing or invalid. Please update the application source code to include the correct ID.
+          The team <strong>SPREADSHEET_ID</strong> is missing or invalid. Please update the application source code to
+          include the correct ID.
         </p>
         <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 font-mono text-xs text-indigo-400">
           const SPREADSHEET_ID = "YOUR_SHEET_ID_HERE";
@@ -88,6 +104,44 @@ const App: React.FC = () => {
   // Promise that resolves only when gapi init is complete.
   const gapiReadyRef = useRef<Promise<void> | null>(null);
 
+  // ---- Diagnostics helpers ----
+  const logInit = (...args: any[]) => {
+    // Keep logs but make them easy to filter.
+    console.log('[GAPI_INIT]', ...args);
+  };
+
+  const hasGapi = () => !!window.gapi;
+  const hasGIS = () => !!window.google?.accounts?.oauth2;
+
+  const waitForLibraries = (timeoutMs = 10000) =>
+    new Promise<void>((resolve, reject) => {
+      const start = Date.now();
+      const t = window.setInterval(() => {
+        const ok = hasGapi() && hasGIS();
+        if (ok) {
+          window.clearInterval(t);
+          resolve();
+          return;
+        }
+        if (Date.now() - start > timeoutMs) {
+          window.clearInterval(t);
+          reject(new Error('Google libraries not loaded (gapi and/or GIS missing or blocked).'));
+        }
+      }, 100);
+    });
+
+  const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timer: number | null = null;
+    try {
+      const timeout = new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      });
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) window.clearTimeout(timer);
+    }
+  };
+
   // Statistics calculation
   const stats = useMemo(() => {
     const total = cards.length;
@@ -104,7 +158,6 @@ const App: React.FC = () => {
       setSyncStatus('syncing');
 
       try {
-        // @ts-ignore
         await gapi.client.sheets.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: 'PIPELINE_DATA!A1',
@@ -128,7 +181,6 @@ const App: React.FC = () => {
     setSyncStatus('connecting');
 
     try {
-      // @ts-ignore
       const response = await gapi.client.sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: 'PIPELINE_DATA!A1',
@@ -151,7 +203,6 @@ const App: React.FC = () => {
       const msg = err?.result?.error?.message || '';
       if (err.status === 404 || msg.toLowerCase().includes('not found')) {
         try {
-          // @ts-ignore
           await gapi.client.sheets.spreadsheets.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
             resource: {
@@ -212,38 +263,41 @@ const App: React.FC = () => {
       setCards([templateCard]);
     }
 
-    if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID')) return;
-
-    // Wait until both libraries exist, then init.
-    const waitForLibraries = () =>
-      new Promise<void>((resolve) => {
-        const t = window.setInterval(() => {
-          // @ts-ignore
-          if (window.gapi && window.google && window.google.accounts && window.google.accounts.oauth2) {
-            window.clearInterval(t);
-            resolve();
-          }
-        }, 100);
-      });
+    // If you never set a real client id, don't block UI on init; just leave disconnected.
+    if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID')) {
+      setIsGapiLoaded(false);
+      setIsGapiReady(false);
+      setSyncStatus('disconnected');
+      return;
+    }
 
     const init = async () => {
       try {
         setIsGapiReady(false);
-        await waitForLibraries();
+        setIsGapiLoaded(false);
 
-        // Build a "gapi ready" promise so OAuth callback can await it.
+        logInit('Starting init...');
+        logInit('Initial globals', { hasGapi: hasGapi(), hasGIS: hasGIS() });
+
+        // 1) Wait for both scripts. If they never load (blocked/missing), we fail loudly.
+        await withTimeout(waitForLibraries(12000), 13000, 'waitForLibraries');
+
+        logInit('Libraries detected', { hasGapi: hasGapi(), hasGIS: hasGIS() });
+
+        // 2) Initialize gapi client. Add timeout so we never hang.
         gapiReadyRef.current = new Promise<void>((resolve, reject) => {
-          // @ts-ignore
           gapi.load('client', async () => {
             try {
-              // @ts-ignore
-              await gapi.client.init({ discoveryDocs: DISCOVERY_DOCS });
+              logInit('gapi.load callback fired. Initializing client...');
+              await withTimeout(gapi.client.init({ discoveryDocs: DISCOVERY_DOCS }), 12000, 'gapi.client.init');
+
               setIsGapiLoaded(true);
               setIsGapiReady(true);
+              logInit('gapi ready ✅');
               resolve();
             } catch (initErr) {
               console.error('GAPI Init Error:', initErr);
-              setSyncStatus('error');
+              setSyncStatus('init_failed');
               setIsGapiLoaded(false);
               setIsGapiReady(false);
               reject(initErr);
@@ -251,7 +305,7 @@ const App: React.FC = () => {
           });
         });
 
-        // @ts-ignore
+        // 3) Initialize the token client (GIS)
         tokenClientRef.current = google.accounts.oauth2.initTokenClient({
           client_id: CLIENT_ID,
           scope: SCOPES,
@@ -263,12 +317,10 @@ const App: React.FC = () => {
             }
 
             try {
-              // Make absolutely sure gapi is initialized before we call Sheets.
+              // Make sure gapi is initialized before calling Sheets.
               await gapiReadyRef.current;
 
-              // @ts-ignore
               gapi.client.setToken(response);
-
               await handleSyncWithSheet();
             } catch (e) {
               console.error('Auth callback failed:', e);
@@ -276,17 +328,28 @@ const App: React.FC = () => {
             }
           },
         });
-      } catch (err) {
+
+        // If we got here, we at least have the button enabled.
+        setSyncStatus('disconnected');
+      } catch (err: any) {
         console.error('GAPI sequence failed:', err);
-        setSyncStatus('error');
+
+        // Helpful, explicit reasons
+        const msg = String(err?.message || err || '');
+        if (msg.toLowerCase().includes('libraries not loaded')) {
+          setSyncStatus('init_missing_scripts');
+        } else if (msg.toLowerCase().includes('timed out')) {
+          setSyncStatus('init_timeout');
+        } else {
+          setSyncStatus('init_failed');
+        }
+
         setIsGapiLoaded(false);
         setIsGapiReady(false);
       }
     };
 
     init();
-
-    // IMPORTANT FIX: run init ONLY once (avoid re-init loops)
   }, []);
 
   // Persist locally + autosave to Sheet (if connected)
@@ -305,7 +368,9 @@ const App: React.FC = () => {
   const connectToDrive = () => {
     // Hard guard: don't even try if not ready.
     if (!isGapiReady) {
-      alert('System initializing. Please wait a moment, then try again.');
+      alert(
+        'Google API is not ready. If this keeps happening, your browser may be blocking Google scripts (adblock/privacy), or index.html is missing required script tags.'
+      );
       return;
     }
 
@@ -405,6 +470,37 @@ const App: React.FC = () => {
           <Table size={14} className="animate-spin" />
           <span className="text-[10px] font-bold uppercase tracking-tight">Updating Cloud...</span>
         </div>
+      );
+    }
+
+    // Show explicit init errors instead of permanent “Initializing…”
+    const initErrorLabel =
+      syncStatus === 'init_missing_scripts'
+        ? 'Google scripts blocked/missing'
+        : syncStatus === 'init_timeout'
+          ? 'Google init timed out'
+          : syncStatus === 'init_failed'
+            ? 'Google init failed'
+            : syncStatus === 'unauthorized'
+              ? 'Unauthorized'
+              : syncStatus === 'auth_fail'
+                ? 'Auth failed'
+                : null;
+
+    if (initErrorLabel) {
+      return (
+        <button
+          onClick={connectToDrive}
+          disabled={!isGapiReady}
+          title={
+            initErrorLabel +
+            '. Check DevTools console for [GAPI_INIT] logs and verify index.html includes api.js + gsi/client.'
+          }
+          className="flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border transition-all bg-rose-50 text-rose-700 border-rose-200"
+        >
+          <AlertTriangle size={12} />
+          {initErrorLabel}
+        </button>
       );
     }
 

@@ -285,7 +285,7 @@ const App: React.FC = () => {
     };
 
     init();
-  }, [handleSyncWithSheet]);
+  }, []);
 
   // Persist locally + autosave to Sheet (if connected)
   useEffect(() => {

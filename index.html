@@ -1,19 +1,23 @@
-
 <!DOCTYPE html>
 <html lang="en" class="h-full">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vid Trackr | Production HQ</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
     <!-- Google API Client & Identity Services for Drive Sync -->
     <script src="https://apis.google.com/js/api.js"></script>
     <script src="https://accounts.google.com/gsi/client"></script>
-    
+
     <style>
       body {
         font-family: 'Inter', sans-serif;
@@ -57,7 +61,9 @@
         margin-bottom: 1.5rem;
       }
       @keyframes spin {
-        to { transform: rotate(360deg); }
+        to {
+          transform: rotate(360deg);
+        }
       }
 
       /* Custom Professional Scrollbar */
@@ -76,34 +82,61 @@
         background: #cbd5e1;
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react": "https://esm.sh/react@^19.2.3",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
-    "@google/genai": "https://esm.sh/@google/genai@^1.38.0",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
-    "vite": "https://esm.sh/vite@^7.3.1"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
-</head>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@^19.2.3",
+          "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+          "react/": "https://esm.sh/react@^19.2.3/",
+          "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+          "@google/genai": "https://esm.sh/@google/genai@^1.38.0",
+          "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+          "vite": "https://esm.sh/vite@^7.3.1"
+        }
+      }
+    </script>
+
+    <!-- ✅ IMPORTANT: use relative paths for GitHub Pages -->
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+
   <body class="h-full">
     <div id="error-display"></div>
-    
+
     <div id="root" class="h-full">
       <div class="loading-screen" id="app-loader">
         <div class="loader-spinner"></div>
         <div class="text-center">
-          <p style="font-weight: 800; color: #1e293b; text-transform: uppercase; letter-spacing: 0.15em; font-size: 12px; margin-bottom: 4px;">Vid Trackr</p>
-          <p id="loader-status" style="font-weight: 500; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; font-size: 10px;">Initializing Production Engine...</p>
+          <p
+            style="
+              font-weight: 800;
+              color: #1e293b;
+              text-transform: uppercase;
+              letter-spacing: 0.15em;
+              font-size: 12px;
+              margin-bottom: 4px;
+            "
+          >
+            Vid Trackr
+          </p>
+          <p
+            id="loader-status"
+            style="
+              font-weight: 500;
+              color: #94a3b8;
+              text-transform: uppercase;
+              letter-spacing: 0.1em;
+              font-size: 10px;
+            "
+          >
+            Initializing Production Engine...
+          </p>
         </div>
       </div>
     </div>
 
-    <script type="module" src="/index.tsx"></script>
+    <!-- ✅ IMPORTANT: use relative path for GitHub Pages -->
+    <script type="module" src="./index.tsx"></script>
   </body>
 </html>

@@ -119,7 +119,7 @@ const App: React.FC = () => {
         setSyncStatus('error');
       }
     },
-    [isGapiLoaded, cards, stages]
+    [isGapiLoaded]
   );
 
   const handleSyncWithSheet = useCallback(async () => {
@@ -285,6 +285,8 @@ const App: React.FC = () => {
     };
 
     init();
+
+    // IMPORTANT FIX: run init ONLY once (avoid re-init loops)
   }, []);
 
   // Persist locally + autosave to Sheet (if connected)
@@ -406,7 +408,6 @@ const App: React.FC = () => {
       );
     }
 
-    // disconnected / unauthorized / error / auth_fail all show the button
     return (
       <button
         onClick={connectToDrive}
@@ -436,9 +437,7 @@ const App: React.FC = () => {
             <div>
               <h1 className="font-extrabold text-xl tracking-tight leading-none mb-1">Vid Trackr</h1>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                  Team Production Hub
-                </span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Team Production Hub</span>
               </div>
             </div>
           </div>
@@ -594,14 +593,25 @@ const App: React.FC = () => {
             cards={filteredCards}
             onRestore={(id) => {
               const c = cards.find((card) => card.id === id);
-              if (c) updateCard({ ...c, isTrashed: false, status: c.originalStatus || stages[0].label, deletedDate: undefined });
+              if (c)
+                updateCard({
+                  ...c,
+                  isTrashed: false,
+                  status: c.originalStatus || stages[0].label,
+                  deletedDate: undefined,
+                });
             }}
             onPermanentDelete={(id) => setCards((prev) => prev.filter((c) => c.id !== id))}
           />
         )}
       </main>
 
-      <IdeaInput isOpen={isInputOpen} onClose={() => setIsInputOpen(false)} onAdd={addCards} defaultStatus={inputDefaultStatus} />
+      <IdeaInput
+        isOpen={isInputOpen}
+        onClose={() => setIsInputOpen(false)}
+        onAdd={addCards}
+        defaultStatus={inputDefaultStatus}
+      />
 
       {activeCard && (
         <CardModal
@@ -615,7 +625,12 @@ const App: React.FC = () => {
         />
       )}
 
-      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} stages={stages} onUpdateStages={(s) => setStages(s)} />
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        stages={stages}
+        onUpdateStages={(s) => setStages(s)}
+      />
     </div>
   );
 };

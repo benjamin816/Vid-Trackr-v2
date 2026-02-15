@@ -1,11 +1,10 @@
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { 
-  Plus, 
-  Search, 
-  Archive, 
-  Layout, 
-  Calendar as CalendarIcon, 
+import {
+  Plus,
+  Search,
+  Archive,
+  Layout,
+  Calendar as CalendarIcon,
   Sparkles,
   Trash2,
   Table,
@@ -14,7 +13,7 @@ import {
   ShieldCheck,
   BarChart2,
   AlertTriangle,
-  Lock
+  Lock,
 } from 'lucide-react';
 import { VideoCard, ViewMode, WorkflowStage, FunnelStage, StageConfig } from './types.ts';
 import { DEFAULT_WORKFLOW_STAGES } from './constants.tsx';
@@ -34,15 +33,23 @@ const SPREADSHEET_ID = "1W9216uzRoQOsmks9xl5v2d8U3dSzeveiUduTZ63dkjk";
 const CLIENT_ID = "979572069887-6c96876re4v9udofbpqbfmqjru2q91q3.apps.googleusercontent.com";
 const DISCOVERY_DOCS = [
   'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
-  'https://sheets.googleapis.com/$discovery/rest?version=v4'
+  'https://sheets.googleapis.com/$discovery/rest?version=v4',
 ];
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
+const SCOPES =
+  'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
-type SyncStatus = 'disconnected' | 'connecting' | 'synced' | 'syncing' | 'error' | 'unauthorized' | 'auth_fail';
+type SyncStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'synced'
+  | 'syncing'
+  | 'error'
+  | 'unauthorized'
+  | 'auth_fail';
 
 const App: React.FC = () => {
   // --- Check for missing Spreadsheet ID ---
-  if (!SPREADSHEET_ID || SPREADSHEET_ID.trim() === "") {
+  if (!SPREADSHEET_ID || SPREADSHEET_ID.trim() === '') {
     return (
       <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-900 text-white p-8">
         <div className="w-16 h-16 bg-rose-500 rounded-2xl flex items-center justify-center mb-6 shadow-2xl shadow-rose-500/20">
@@ -64,7 +71,7 @@ const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('board');
   const [searchQuery, setSearchQuery] = useState('');
   const [funnelFilter, setFunnelFilter] = useState<FunnelStage | undefined>(undefined);
-  
+
   const [isInputOpen, setIsInputOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [inputDefaultStatus, setInputDefaultStatus] = useState<WorkflowStage | undefined>(undefined);
@@ -72,113 +79,54 @@ const App: React.FC = () => {
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('disconnected');
   const [isGapiLoaded, setIsGapiLoaded] = useState(false);
+  const [isGapiReady, setIsGapiReady] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+
   const tokenClientRef = useRef<any>(null);
   const saveTimeoutRef = useRef<number | null>(null);
+
+  // Promise that resolves only when gapi init is complete.
+  const gapiReadyRef = useRef<Promise<void> | null>(null);
 
   // Statistics calculation
   const stats = useMemo(() => {
     const total = cards.length;
-    const archived = cards.filter(c => c.isArchived && !c.isTrashed).length;
-    const active = cards.filter(c => !c.isArchived && !c.isTrashed).length;
-    const inBacklog = cards.filter(c => c.status === stages[0].label && !c.isTrashed).length;
+    const archived = cards.filter((c) => c.isArchived && !c.isTrashed).length;
+    const active = cards.filter((c) => !c.isArchived && !c.isTrashed).length;
+    const inBacklog = cards.filter((c) => c.status === stages[0].label && !c.isTrashed).length;
     return { total, archived, active, inBacklog };
   }, [cards, stages]);
 
-  useEffect(() => {
-    const savedCards = localStorage.getItem('video_funnel_tracker_cards');
-    const savedStages = localStorage.getItem('video_funnel_tracker_stages');
-    
-    if (savedStages) {
-      try { setStages(JSON.parse(savedStages)); } catch (e) { console.error(e); }
-    }
+  // ----- SHEET SYNC -----
+  const saveToSheet = useCallback(
+    async (data: any) => {
+      if (!isGapiLoaded) return;
+      setSyncStatus('syncing');
 
-    if (savedCards) {
-      try { setCards(JSON.parse(savedCards)); } catch (e) { console.error(e); }
-    } else {
-      const templateCard: VideoCard = {
-        id: crypto.randomUUID(),
-        title: "Template: Why Raleigh is Booming in 2025",
-        funnelStage: FunnelStage.TOF,
-        formatType: "Pros & Cons",
-        targetRuntime: 22,
-        status: DEFAULT_WORKFLOW_STAGES[0].label,
-        notes: "Welcome! Data is synced to our Team Google Sheet.",
-        neighborhood: "Raleigh, NC",
-        createdDate: new Date().toISOString(),
-        inspirationLinks: [{ url: '' }, { url: '' }, { url: '' }],
-        externalDocs: [],
-        checklist: [],
-        groundingSources: [],
-        isArchived: false,
-        isTrashed: false
-      };
-      setCards([templateCard]);
-    }
-
-    const initGapi = async () => {
       try {
-        const checkLibraries = setInterval(() => {
-          // @ts-ignore
-          if (window.gapi && window.google && window.google.accounts) {
-            clearInterval(checkLibraries);
-            setupGapi();
-          }
-        }, 100);
+        // @ts-ignore
+        await gapi.client.sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'PIPELINE_DATA!A1',
+          valueInputOption: 'RAW',
+          resource: { values: [[JSON.stringify(data)]] },
+        });
 
-        const setupGapi = () => {
-          // @ts-ignore
-          gapi.load('client', async () => {
-            try {
-              // @ts-ignore
-              await gapi.client.init({ discoveryDocs: DISCOVERY_DOCS });
-              setIsGapiLoaded(true);
-            } catch (initErr) {
-              console.error("GAPI Init Error:", initErr);
-              setSyncStatus('error');
-            }
-          });
-
-          // @ts-ignore
-          tokenClientRef.current = google.accounts.oauth2.initTokenClient({
-            client_id: CLIENT_ID,
-            scope: SCOPES,
-            callback: async (response: any) => {
-              if (response.error !== undefined) {
-                setSyncStatus('auth_fail');
-                return;
-              }
-              // @ts-ignore
-              gapi.client.setToken(response);
-              await handleSyncWithSheet();
-            },
-          });
-        };
-      } catch (err) {
-        console.error("GAPI sequence failed:", err);
+        setSyncStatus('synced');
+        setLastSyncedAt(new Date());
+      } catch (err: any) {
+        console.error('Sheet Save Failed:', err);
+        setSyncStatus('error');
       }
-    };
+    },
+    [isGapiLoaded, cards, stages]
+  );
 
-    if (CLIENT_ID && !CLIENT_ID.includes("YOUR_CLIENT_ID")) {
-      initGapi();
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('video_funnel_tracker_cards', JSON.stringify(cards));
-    localStorage.setItem('video_funnel_tracker_stages', JSON.stringify(stages));
-    
-    if (syncStatus === 'synced' || syncStatus === 'syncing') {
-      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
-      saveTimeoutRef.current = window.setTimeout(() => {
-        saveToSheet({ cards, stages });
-      }, 3000);
-    }
-  }, [cards, stages, syncStatus]);
-
-  const handleSyncWithSheet = async () => {
+  const handleSyncWithSheet = useCallback(async () => {
     if (!isGapiLoaded) return;
+
     setSyncStatus('connecting');
+
     try {
       // @ts-ignore
       const response = await gapi.client.sheets.spreadsheets.values.get({
@@ -186,94 +134,243 @@ const App: React.FC = () => {
         range: 'PIPELINE_DATA!A1',
       });
 
-      if (response.result.values && response.result.values[0]) {
+      if (response?.result?.values && response.result.values[0]) {
         const remoteData = JSON.parse(response.result.values[0][0]);
         if (remoteData.cards) setCards(remoteData.cards);
         if (remoteData.stages) setStages(remoteData.stages);
+
         setSyncStatus('synced');
         setLastSyncedAt(new Date());
       } else {
         await saveToSheet({ cards, stages });
       }
     } catch (err: any) {
-      console.error("Sheet Sync Failed:", err);
-      if (err.status === 404 || err.result?.error?.message?.includes('not found')) {
+      console.error('Sheet Sync Failed:', err);
+
+      // If sheet/tab doesn't exist, create the tab
+      const msg = err?.result?.error?.message || '';
+      if (err.status === 404 || msg.toLowerCase().includes('not found')) {
         try {
           // @ts-ignore
           await gapi.client.sheets.spreadsheets.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
-            resource: { requests: [{ addSheet: { properties: { title: 'PIPELINE_DATA' } } }] }
+            resource: {
+              requests: [{ addSheet: { properties: { title: 'PIPELINE_DATA' } } }],
+            },
           });
+
           await saveToSheet({ cards, stages });
         } catch (createErr) {
+          console.error('Failed creating PIPELINE_DATA sheet:', createErr);
           setSyncStatus('error');
         }
-      } else if (err.status === 401 || err.status === 403) setSyncStatus('unauthorized');
-      else setSyncStatus('error');
+      } else if (err.status === 401 || err.status === 403) {
+        setSyncStatus('unauthorized');
+      } else {
+        setSyncStatus('error');
+      }
     }
-  };
+  }, [isGapiLoaded, cards, stages, saveToSheet]);
 
-  const saveToSheet = async (data: any) => {
-    if (!isGapiLoaded) return;
-    setSyncStatus('syncing');
-    try {
-      // @ts-ignore
-      await gapi.client.sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: 'PIPELINE_DATA!A1',
-        valueInputOption: 'RAW',
-        resource: { values: [[JSON.stringify(data)]] }
-      });
-      setSyncStatus('synced');
-      setLastSyncedAt(new Date());
-    } catch (err: any) {
-      console.error("Sheet Save Failed:", err);
-      setSyncStatus('error');
+  // ----- INIT (GAPI + GIS) -----
+  useEffect(() => {
+    const savedCards = localStorage.getItem('video_funnel_tracker_cards');
+    const savedStages = localStorage.getItem('video_funnel_tracker_stages');
+
+    if (savedStages) {
+      try {
+        setStages(JSON.parse(savedStages));
+      } catch (e) {
+        console.error(e);
+      }
     }
-  };
+
+    if (savedCards) {
+      try {
+        setCards(JSON.parse(savedCards));
+      } catch (e) {
+        console.error(e);
+      }
+    } else {
+      const templateCard: VideoCard = {
+        id: crypto.randomUUID(),
+        title: 'Template: Why Raleigh is Booming in 2025',
+        funnelStage: FunnelStage.TOF,
+        formatType: 'Pros & Cons',
+        targetRuntime: 22,
+        status: DEFAULT_WORKFLOW_STAGES[0].label,
+        notes: 'Welcome! Data is synced to our Team Google Sheet.',
+        neighborhood: 'Raleigh, NC',
+        createdDate: new Date().toISOString(),
+        inspirationLinks: [{ url: '' }, { url: '' }, { url: '' }],
+        externalDocs: [],
+        checklist: [],
+        groundingSources: [],
+        isArchived: false,
+        isTrashed: false,
+      };
+      setCards([templateCard]);
+    }
+
+    if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID')) return;
+
+    // Wait until both libraries exist, then init.
+    const waitForLibraries = () =>
+      new Promise<void>((resolve) => {
+        const t = window.setInterval(() => {
+          // @ts-ignore
+          if (window.gapi && window.google && window.google.accounts && window.google.accounts.oauth2) {
+            window.clearInterval(t);
+            resolve();
+          }
+        }, 100);
+      });
+
+    const init = async () => {
+      try {
+        setIsGapiReady(false);
+        await waitForLibraries();
+
+        // Build a "gapi ready" promise so OAuth callback can await it.
+        gapiReadyRef.current = new Promise<void>((resolve, reject) => {
+          // @ts-ignore
+          gapi.load('client', async () => {
+            try {
+              // @ts-ignore
+              await gapi.client.init({ discoveryDocs: DISCOVERY_DOCS });
+              setIsGapiLoaded(true);
+              setIsGapiReady(true);
+              resolve();
+            } catch (initErr) {
+              console.error('GAPI Init Error:', initErr);
+              setSyncStatus('error');
+              setIsGapiLoaded(false);
+              setIsGapiReady(false);
+              reject(initErr);
+            }
+          });
+        });
+
+        // @ts-ignore
+        tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: async (response: any) => {
+            if (response?.error) {
+              console.error('OAuth Error:', response);
+              setSyncStatus('auth_fail');
+              return;
+            }
+
+            try {
+              // Make absolutely sure gapi is initialized before we call Sheets.
+              await gapiReadyRef.current;
+
+              // @ts-ignore
+              gapi.client.setToken(response);
+
+              await handleSyncWithSheet();
+            } catch (e) {
+              console.error('Auth callback failed:', e);
+              setSyncStatus('error');
+            }
+          },
+        });
+      } catch (err) {
+        console.error('GAPI sequence failed:', err);
+        setSyncStatus('error');
+        setIsGapiLoaded(false);
+        setIsGapiReady(false);
+      }
+    };
+
+    init();
+  }, [handleSyncWithSheet]);
+
+  // Persist locally + autosave to Sheet (if connected)
+  useEffect(() => {
+    localStorage.setItem('video_funnel_tracker_cards', JSON.stringify(cards));
+    localStorage.setItem('video_funnel_tracker_stages', JSON.stringify(stages));
+
+    if (syncStatus === 'synced' || syncStatus === 'syncing') {
+      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = window.setTimeout(() => {
+        saveToSheet({ cards, stages });
+      }, 3000);
+    }
+  }, [cards, stages, syncStatus, saveToSheet]);
 
   const connectToDrive = () => {
+    // Hard guard: don't even try if not ready.
+    if (!isGapiReady) {
+      alert('System initializing. Please wait a moment, then try again.');
+      return;
+    }
+
     if (tokenClientRef.current) {
       tokenClientRef.current.requestAccessToken({ prompt: 'consent' });
     } else {
-      alert("System initializing. Please wait.");
+      alert('System initializing. Please wait.');
     }
   };
 
-  const addCards = useCallback((newCards: VideoCard[]) => setCards(prev => [...prev, ...newCards]), []);
-  const updateCard = useCallback((updatedCard: VideoCard) => setCards(prev => prev.map(c => c.id === updatedCard.id ? updatedCard : c)), []);
-  
+  const addCards = useCallback((newCards: VideoCard[]) => setCards((prev) => [...prev, ...newCards]), []);
+  const updateCard = useCallback(
+    (updatedCard: VideoCard) => setCards((prev) => prev.map((c) => (c.id === updatedCard.id ? updatedCard : c))),
+    []
+  );
+
   const deleteCardToTrash = useCallback((id: string) => {
-    setCards(prev => prev.map(c => c.id === id ? { ...c, isTrashed: true, deletedDate: new Date().toISOString(), originalStatus: c.status } : c));
+    setCards((prev) =>
+      prev.map((c) =>
+        c.id === id ? { ...c, isTrashed: true, deletedDate: new Date().toISOString(), originalStatus: c.status } : c
+      )
+    );
   }, []);
 
   const archiveCard = useCallback((id: string) => {
-    setCards(prev => prev.map(c => c.id === id ? { ...c, isArchived: true, actualPublishDate: new Date().toISOString(), originalStatus: c.status } : c));
+    setCards((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? { ...c, isArchived: true, actualPublishDate: new Date().toISOString(), originalStatus: c.status }
+          : c
+      )
+    );
   }, []);
 
-  const moveCard = useCallback((id: string, newStatus: WorkflowStage) => {
-    setCards(prev => prev.map(c => {
-      if (c.id === id) {
-        const isFinal = newStatus === stages[stages.length - 1].label;
-        return { 
-          ...c, 
-          status: newStatus, 
-          isArchived: isFinal, 
-          actualPublishDate: isFinal ? new Date().toISOString() : c.actualPublishDate, 
-          originalStatus: c.status 
-        };
-      }
-      return c;
-    }));
-  }, [stages]);
+  const moveCard = useCallback(
+    (id: string, newStatus: WorkflowStage) => {
+      setCards((prev) =>
+        prev.map((c) => {
+          if (c.id === id) {
+            const isFinal = newStatus === stages[stages.length - 1].label;
+            return {
+              ...c,
+              status: newStatus,
+              isArchived: isFinal,
+              actualPublishDate: isFinal ? new Date().toISOString() : c.actualPublishDate,
+              originalStatus: c.status,
+            };
+          }
+          return c;
+        })
+      );
+    },
+    [stages]
+  );
 
   const rescheduleCard = useCallback((id: string, date: string, type: 'shoot' | 'publish') => {
-    setCards(prev => prev.map(c => c.id === id ? { ...c, [type === 'shoot' ? 'targetShootDate' : 'targetPublishDate']: date } : c));
+    setCards((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, [type === 'shoot' ? 'targetShootDate' : 'targetPublishDate']: date } : c))
+    );
   }, []);
 
   const filteredCards = useMemo(() => {
-    return cards.filter(card => {
-      const matchesSearch = card.title.toLowerCase().includes(searchQuery.toLowerCase()) || (card.neighborhood || '').toLowerCase().includes(searchQuery.toLowerCase());
+    return cards.filter((card) => {
+      const matchesSearch =
+        card.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (card.neighborhood || '').toLowerCase().includes(searchQuery.toLowerCase());
+
       if (!matchesSearch) return false;
       if (viewMode === 'trash') return card.isTrashed;
       if (viewMode === 'archive') return card.isArchived && !card.isTrashed;
@@ -281,7 +378,7 @@ const App: React.FC = () => {
     });
   }, [cards, searchQuery, viewMode]);
 
-  const activeCard = useMemo(() => cards.find(c => c.id === selectedCardId), [cards, selectedCardId]);
+  const activeCard = useMemo(() => cards.find((c) => c.id === selectedCardId), [cards, selectedCardId]);
 
   const renderSyncStatus = () => {
     if (syncStatus === 'synced') {
@@ -299,6 +396,7 @@ const App: React.FC = () => {
         </div>
       );
     }
+
     if (syncStatus === 'syncing' || syncStatus === 'connecting') {
       return (
         <div className="flex items-center gap-2 text-blue-500">
@@ -307,12 +405,22 @@ const App: React.FC = () => {
         </div>
       );
     }
+
+    // disconnected / unauthorized / error / auth_fail all show the button
     return (
-      <button 
+      <button
         onClick={connectToDrive}
-        className="flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase border border-indigo-100 hover:bg-indigo-100 transition-all"
+        disabled={!isGapiReady}
+        title={!isGapiReady ? 'Initializing Google API… please wait' : ''}
+        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border transition-all
+          ${
+            !isGapiReady
+              ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+              : 'bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100'
+          }`}
       >
-        <Lock size={12} /> Authorize Team Sync
+        <Lock size={12} />
+        {!isGapiReady ? 'Initializing…' : 'Authorize Team Sync'}
       </button>
     );
   };
@@ -328,20 +436,25 @@ const App: React.FC = () => {
             <div>
               <h1 className="font-extrabold text-xl tracking-tight leading-none mb-1">Vid Trackr</h1>
               <div className="flex items-center gap-2">
-                 <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Team Production Hub</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                  Team Production Hub
+                </span>
               </div>
             </div>
           </div>
-          
+
           <div className="flex-1 max-w-lg px-8 hidden xl:block">
             <div className="relative group">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
-              <input 
-                type="text" 
-                placeholder="Search ideas, locations, scripts..." 
-                className="w-full pl-11 pr-4 py-2.5 bg-slate-100 border-none rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all outline-none" 
-                value={searchQuery} 
-                onChange={(e) => setSearchQuery(e.target.value)} 
+              <Search
+                className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors"
+                size={18}
+              />
+              <input
+                type="text"
+                placeholder="Search ideas, locations, scripts..."
+                className="w-full pl-11 pr-4 py-2.5 bg-slate-100 border-none rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
           </div>
@@ -350,13 +463,45 @@ const App: React.FC = () => {
             {renderSyncStatus()}
 
             <div className="flex bg-slate-100 p-1 rounded-xl ml-2">
-              <button onClick={() => setViewMode('board')} className={`p-2 rounded-lg transition-all ${viewMode === 'board' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`} title="Kanban Board"><Layout size={20} /></button>
-              <button onClick={() => setViewMode('calendar')} className={`p-2 rounded-lg transition-all ${viewMode === 'calendar' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`} title="Production Calendar"><CalendarIcon size={20} /></button>
-              <button onClick={() => setViewMode('archive')} className={`p-2 rounded-lg transition-all ${viewMode === 'archive' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`} title="Published Archive"><Archive size={20} /></button>
-              <button onClick={() => setViewMode('trash')} className={`p-2 rounded-lg transition-all ${viewMode === 'trash' ? 'bg-white shadow-sm text-rose-600' : 'text-slate-400 hover:text-slate-600'}`} title="Trash Bin"><Trash2 size={20} /></button>
+              <button
+                onClick={() => setViewMode('board')}
+                className={`p-2 rounded-lg transition-all ${
+                  viewMode === 'board' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'
+                }`}
+                title="Kanban Board"
+              >
+                <Layout size={20} />
+              </button>
+              <button
+                onClick={() => setViewMode('calendar')}
+                className={`p-2 rounded-lg transition-all ${
+                  viewMode === 'calendar' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'
+                }`}
+                title="Production Calendar"
+              >
+                <CalendarIcon size={20} />
+              </button>
+              <button
+                onClick={() => setViewMode('archive')}
+                className={`p-2 rounded-lg transition-all ${
+                  viewMode === 'archive' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'
+                }`}
+                title="Published Archive"
+              >
+                <Archive size={20} />
+              </button>
+              <button
+                onClick={() => setViewMode('trash')}
+                className={`p-2 rounded-lg transition-all ${
+                  viewMode === 'trash' ? 'bg-white shadow-sm text-rose-600' : 'text-slate-400 hover:text-slate-600'
+                }`}
+                title="Trash Bin"
+              >
+                <Trash2 size={20} />
+              </button>
             </div>
-            
-            <button 
+
+            <button
               onClick={() => setIsSettingsOpen(true)}
               className="p-2.5 bg-slate-100 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600 rounded-xl transition-all"
               title="Board Settings"
@@ -364,8 +509,11 @@ const App: React.FC = () => {
               <SettingsIcon size={20} />
             </button>
 
-            <button 
-              onClick={() => { setInputDefaultStatus(undefined); setIsInputOpen(true); }} 
+            <button
+              onClick={() => {
+                setInputDefaultStatus(undefined);
+                setIsInputOpen(true);
+              }}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-2xl text-sm font-bold transition-all shadow-lg shadow-indigo-200 active:scale-95"
             >
               <Plus size={20} /> New Video
@@ -378,23 +526,25 @@ const App: React.FC = () => {
             <BarChart2 size={16} className="text-slate-400" />
             <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Pipeline Health:</span>
           </div>
+
           <div className="flex items-center gap-6">
             <div className="flex flex-col">
-               <span className="text-xs font-bold text-slate-800">{stats.active}</span>
-               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">In Progress</span>
+              <span className="text-xs font-bold text-slate-800">{stats.active}</span>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">In Progress</span>
             </div>
             <div className="flex flex-col">
-               <span className="text-xs font-bold text-indigo-600">{stats.inBacklog}</span>
-               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">Idea Pool</span>
+              <span className="text-xs font-bold text-indigo-600">{stats.inBacklog}</span>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">Idea Pool</span>
             </div>
             <div className="flex flex-col">
-               <span className="text-xs font-bold text-emerald-600">{stats.archived}</span>
-               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">Published</span>
+              <span className="text-xs font-bold text-emerald-600">{stats.archived}</span>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">Published</span>
             </div>
           </div>
+
           {syncStatus === 'synced' && (
             <div className="ml-auto flex items-center gap-3">
-               <a 
+              <a
                 href={`https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`}
                 target="_blank"
                 rel="noreferrer"
@@ -408,14 +558,63 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 overflow-hidden relative z-0">
-        {viewMode === 'board' && <KanbanBoard stages={stages} cards={filteredCards} onMoveCard={moveCard} onSelectCard={setSelectedCardId} onAddAtStage={(stage) => { setInputDefaultStatus(stage); setIsInputOpen(true); }} onArchiveCard={archiveCard} funnelFilter={funnelFilter} onFunnelFilterChange={setFunnelFilter} />}
-        {viewMode === 'calendar' && <CalendarView cards={filteredCards} onSelectCard={setSelectedCardId} onReschedule={rescheduleCard} />}
-        {viewMode === 'archive' && <ArchiveView cards={filteredCards} onSelectCard={setSelectedCardId} onUnarchive={(id) => { const c = cards.find(card => card.id === id); if (c) updateCard({ ...c, isArchived: false, status: c.originalStatus || stages[0].label }); }} />}
-        {viewMode === 'trash' && <TrashView cards={filteredCards} onRestore={(id) => { const c = cards.find(card => card.id === id); if (c) updateCard({ ...c, isTrashed: false, status: c.originalStatus || stages[0].label, deletedDate: undefined }); }} onPermanentDelete={(id) => setCards(prev => prev.filter(c => c.id !== id))} />}
+        {viewMode === 'board' && (
+          <KanbanBoard
+            stages={stages}
+            cards={filteredCards}
+            onMoveCard={moveCard}
+            onSelectCard={setSelectedCardId}
+            onAddAtStage={(stage) => {
+              setInputDefaultStatus(stage);
+              setIsInputOpen(true);
+            }}
+            onArchiveCard={archiveCard}
+            funnelFilter={funnelFilter}
+            onFunnelFilterChange={setFunnelFilter}
+          />
+        )}
+
+        {viewMode === 'calendar' && (
+          <CalendarView cards={filteredCards} onSelectCard={setSelectedCardId} onReschedule={rescheduleCard} />
+        )}
+
+        {viewMode === 'archive' && (
+          <ArchiveView
+            cards={filteredCards}
+            onSelectCard={setSelectedCardId}
+            onUnarchive={(id) => {
+              const c = cards.find((card) => card.id === id);
+              if (c) updateCard({ ...c, isArchived: false, status: c.originalStatus || stages[0].label });
+            }}
+          />
+        )}
+
+        {viewMode === 'trash' && (
+          <TrashView
+            cards={filteredCards}
+            onRestore={(id) => {
+              const c = cards.find((card) => card.id === id);
+              if (c) updateCard({ ...c, isTrashed: false, status: c.originalStatus || stages[0].label, deletedDate: undefined });
+            }}
+            onPermanentDelete={(id) => setCards((prev) => prev.filter((c) => c.id !== id))}
+          />
+        )}
       </main>
 
       <IdeaInput isOpen={isInputOpen} onClose={() => setIsInputOpen(false)} onAdd={addCards} defaultStatus={inputDefaultStatus} />
-      {activeCard && <CardModal card={activeCard} stages={stages} isOpen={!!selectedCardId} onClose={() => setSelectedCardId(null)} onUpdate={updateCard} onDelete={deleteCardToTrash} onArchive={archiveCard} />}
+
+      {activeCard && (
+        <CardModal
+          card={activeCard}
+          stages={stages}
+          isOpen={!!selectedCardId}
+          onClose={() => setSelectedCardId(null)}
+          onUpdate={updateCard}
+          onDelete={deleteCardToTrash}
+          onArchive={archiveCard}
+        />
+      )}
+
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} stages={stages} onUpdateStages={(s) => setStages(s)} />
     </div>
   );

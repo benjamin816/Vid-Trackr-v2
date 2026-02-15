@@ -154,7 +154,8 @@ const App: React.FC = () => {
   // ----- SHEET SYNC -----
   const saveToSheet = useCallback(
     async (data: any) => {
-      if (!isGapiLoaded) return;
+      // Guard on readiness, not just "loaded" (prevents stale-closure early returns)
+      if (!isGapiReady) return;
       setSyncStatus('syncing');
 
       try {
@@ -171,12 +172,13 @@ const App: React.FC = () => {
         console.error('Sheet Save Failed:', err);
         setSyncStatus('error');
       }
-    },
-    [isGapiLoaded]
+        },
+    [isGapiReady]
   );
 
   const handleSyncWithSheet = useCallback(async () => {
-    if (!isGapiLoaded) return;
+    // Guard on readiness, not just "loaded" (prevents stale-closure early returns)
+    if (!isGapiReady) return;
 
     setSyncStatus('connecting');
 
@@ -221,7 +223,7 @@ const App: React.FC = () => {
         setSyncStatus('error');
       }
     }
-  }, [isGapiLoaded, cards, stages, saveToSheet]);
+  }, [isGapiReady, cards, stages, saveToSheet]);
 
   // ----- INIT (GAPI + GIS) -----
   useEffect(() => {

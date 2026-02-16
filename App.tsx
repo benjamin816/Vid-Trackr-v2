@@ -63,7 +63,6 @@ declare global {
 // These declarations tell TypeScript that the global variables exist.
 declare const gapi: any;
 declare const google: any;
-}
 
 function isSpreadsheetConfigured() {
   return !!SPREADSHEET_ID && !SPREADSHEET_ID.includes('YOUR_SHEET_ID_HERE');

@@ -58,6 +58,12 @@ declare global {
     google: any;
   }
 }
+/**
+ * Google APIs are loaded via script tags at runtime.
+ * These declarations tell TypeScript the globals exist.
+ */
+declare const gapi: any;
+declare const google: any;
 
 function isSpreadsheetConfigured() {
   return !!SPREADSHEET_ID && !SPREADSHEET_ID.includes('YOUR_SHEET_ID_HERE');

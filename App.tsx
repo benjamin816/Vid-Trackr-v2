@@ -152,10 +152,13 @@ const App: React.FC = () => {
   }, [cards, stages]);
 
   // ----- SHEET SYNC -----
-  const saveToSheet = useCallback(
+    const saveToSheet = useCallback(
     async (data: any) => {
-      // Guard on readiness, not just "loaded" (prevents stale-closure early returns)
-      if (!isGapiReady) return;
+      // Never rely on captured boolean state for readiness here.
+      // Instead, await the actual gapi init promise.
+      if (!gapiReadyRef.current) return;
+      await gapiReadyRef.current;
+
       setSyncStatus('syncing');
 
       try {
@@ -170,15 +173,18 @@ const App: React.FC = () => {
         setLastSyncedAt(new Date());
       } catch (err: any) {
         console.error('Sheet Save Failed:', err);
-        setSyncStatus('error');
+        // If token expired / missing, show unauthorized so user can re-auth.
+        if (err?.status === 401 || err?.status === 403) setSyncStatus('unauthorized');
+        else setSyncStatus('error');
       }
-        },
-    [isGapiReady]
+    },
+    []
   );
 
-  const handleSyncWithSheet = useCallback(async () => {
-    // Guard on readiness, not just "loaded" (prevents stale-closure early returns)
-    if (!isGapiReady) return;
+    const handleSyncWithSheet = useCallback(async () => {
+    // Same rule: await the init promise, don't rely on captured booleans.
+    if (!gapiReadyRef.current) return;
+    await gapiReadyRef.current;
 
     setSyncStatus('connecting');
 
@@ -201,9 +207,18 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error('Sheet Sync Failed:', err);
 
-      // If sheet/tab doesn't exist, create the tab
       const msg = err?.result?.error?.message || '';
-      if (err.status === 404 || msg.toLowerCase().includes('not found')) {
+
+      // If sheet/tab doesn't exist, create the tab
+      // IMPORTANT: Google often returns 400 INVALID_ARGUMENT (unable to parse range)
+      // when the sheet/tab doesn't exist.
+      const looksLikeMissingTab =
+        err?.status === 404 ||
+        msg.toLowerCase().includes('not found') ||
+        msg.toLowerCase().includes('unable to parse range') ||
+        msg.toLowerCase().includes('invalid argument');
+
+      if (looksLikeMissingTab) {
         try {
           await gapi.client.sheets.spreadsheets.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
@@ -217,13 +232,13 @@ const App: React.FC = () => {
           console.error('Failed creating PIPELINE_DATA sheet:', createErr);
           setSyncStatus('error');
         }
-      } else if (err.status === 401 || err.status === 403) {
+      } else if (err?.status === 401 || err?.status === 403) {
         setSyncStatus('unauthorized');
       } else {
         setSyncStatus('error');
       }
     }
-  }, [isGapiReady, cards, stages, saveToSheet]);
+  }, [cards, stages, saveToSheet]);
 
   // ----- INIT (GAPI + GIS) -----
   useEffect(() => {
@@ -308,21 +323,30 @@ const App: React.FC = () => {
         });
 
         // 3) Initialize the token client (GIS)
-        tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+                tokenClientRef.current = google.accounts.oauth2.initTokenClient({
           client_id: CLIENT_ID,
           scope: SCOPES,
           callback: async (response: any) => {
             if (response?.error) {
+              // Silent token attempts can return interaction_required; don't hard-fail the UI.
+              const errStr = String(response?.error || '').toLowerCase();
+              if (errStr.includes('interaction_required') || errStr.includes('consent_required') || errStr.includes('login_required')) {
+                setSyncStatus('disconnected');
+                return;
+              }
               console.error('OAuth Error:', response);
               setSyncStatus('auth_fail');
               return;
             }
 
             try {
-              // Make sure gapi is initialized before calling Sheets.
+              // Ensure gapi is initialized.
               await gapiReadyRef.current;
 
+              // Set token for gapi client
               gapi.client.setToken(response);
+
+              // Immediately attempt to sync so UI can flip to "synced".
               await handleSyncWithSheet();
             } catch (e) {
               console.error('Auth callback failed:', e);
@@ -331,7 +355,14 @@ const App: React.FC = () => {
           },
         });
 
-        // If we got here, we at least have the button enabled.
+        // Try a SILENT token request on load (auto-read on page load when already consented)
+        // If the user hasn't granted consent yet, this will no-op and leave button available.
+        try {
+          tokenClientRef.current.requestAccessToken({ prompt: '' });
+        } catch {
+          // ignore
+        }
+
         setSyncStatus('disconnected');
       } catch (err: any) {
         console.error('GAPI sequence failed:', err);

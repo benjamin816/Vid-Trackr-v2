@@ -36,7 +36,7 @@ const DISCOVERY_DOCS = [
   'https://sheets.googleapis.com/$discovery/rest?version=v4',
 ];
 
-// NOTE: Keep scopes minimal.
+// Keep scopes minimal.
 const SCOPES =
   'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
@@ -50,7 +50,8 @@ type SyncStatus =
   | 'auth_fail'
   | 'init_timeout'
   | 'init_missing_scripts'
-  | 'init_failed';
+  | 'init_failed'
+  | 'conflict';
 
 // Allow using browser gapi/google without TS errors
 declare global {
@@ -61,6 +62,25 @@ declare global {
   const gapi: any;
   const google: any;
 }
+
+type RemoteBlobV2 = {
+  version: 2;
+  updatedAt: number; // epoch ms
+  updatedBy: string;
+  cards: VideoCard[];
+  stages: StageConfig[];
+};
+
+type RemoteBlobCompat = {
+  cards?: VideoCard[];
+  stages?: StageConfig[];
+  // optional v2 fields
+  version?: number;
+  updatedAt?: number;
+  updatedBy?: string;
+};
+
+const POLL_INTERVAL_MS = 7000; // ~7s feels "live" without hammering Sheets
 
 const App: React.FC = () => {
   // --- Check for missing Spreadsheet ID ---
@@ -98,15 +118,26 @@ const App: React.FC = () => {
   const [isGapiReady, setIsGapiReady] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
 
+  // Conflict handling
+  const [hasRemoteUpdate, setHasRemoteUpdate] = useState(false);
+
   const tokenClientRef = useRef<any>(null);
   const saveTimeoutRef = useRef<number | null>(null);
 
   // Promise that resolves only when gapi init is complete.
   const gapiReadyRef = useRef<Promise<void> | null>(null);
 
-  // ---- Diagnostics helpers ----
+  // ---- Collaboration refs ----
+  const applyingRemoteRef = useRef(false);
+  const hasLocalDirtyRef = useRef(false);
+  const lastLocalEditAtRef = useRef<number>(0);
+  const lastRemoteUpdatedAtRef = useRef<number>(0);
+
+  // stable per-browser id
+  const clientIdRef = useRef<string>('');
+
+  // ---- Diagnostics helper ----
   const logInit = (...args: any[]) => {
-    // Keep logs but make them easy to filter.
     console.log('[GAPI_INIT]', ...args);
   };
 
@@ -142,6 +173,43 @@ const App: React.FC = () => {
     }
   };
 
+  const buildRemoteBlob = useCallback(
+    (nextCards: VideoCard[], nextStages: StageConfig[]): RemoteBlobV2 => {
+      return {
+        version: 2,
+        updatedAt: Date.now(),
+        updatedBy: clientIdRef.current || 'unknown',
+        cards: nextCards,
+        stages: nextStages,
+      };
+    },
+    []
+  );
+
+  const parseRemoteBlob = useCallback((raw: string): RemoteBlobV2 | null => {
+    try {
+      const obj = JSON.parse(raw) as RemoteBlobCompat;
+      const v2 = obj?.version === 2;
+      const remoteCards = (obj as any).cards as VideoCard[] | undefined;
+      const remoteStages = (obj as any).stages as StageConfig[] | undefined;
+      if (!remoteCards || !remoteStages) return null;
+
+      const updatedAt = typeof (obj as any).updatedAt === 'number' ? (obj as any).updatedAt : 0;
+      const updatedBy = typeof (obj as any).updatedBy === 'string' ? (obj as any).updatedBy : 'unknown';
+
+      // If older format (no metadata), treat as v2 with updatedAt=0
+      return {
+        version: 2,
+        updatedAt: v2 ? updatedAt : 0,
+        updatedBy: v2 ? updatedBy : 'legacy',
+        cards: remoteCards,
+        stages: remoteStages,
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
   // Statistics calculation
   const stats = useMemo(() => {
     const total = cards.length;
@@ -152,10 +220,8 @@ const App: React.FC = () => {
   }, [cards, stages]);
 
   // ----- SHEET SYNC -----
-    const saveToSheet = useCallback(
-    async (data: any) => {
-      // Never rely on captured boolean state for readiness here.
-      // Instead, await the actual gapi init promise.
+  const saveToSheet = useCallback(
+    async (data: RemoteBlobV2) => {
       if (!gapiReadyRef.current) return;
       await gapiReadyRef.current;
 
@@ -169,11 +235,15 @@ const App: React.FC = () => {
           resource: { values: [[JSON.stringify(data)]] },
         });
 
+        // On successful write, we consider ourselves clean and up-to-date.
+        hasLocalDirtyRef.current = false;
+        lastRemoteUpdatedAtRef.current = data.updatedAt;
+        setHasRemoteUpdate(false);
+
         setSyncStatus('synced');
         setLastSyncedAt(new Date());
       } catch (err: any) {
         console.error('Sheet Save Failed:', err);
-        // If token expired / missing, show unauthorized so user can re-auth.
         if (err?.status === 401 || err?.status === 403) setSyncStatus('unauthorized');
         else setSyncStatus('error');
       }
@@ -181,67 +251,114 @@ const App: React.FC = () => {
     []
   );
 
-    const handleSyncWithSheet = useCallback(async () => {
-    // Same rule: await the init promise, don't rely on captured booleans.
-    if (!gapiReadyRef.current) return;
-    await gapiReadyRef.current;
+  const pullFromSheet = useCallback(
+    async (options?: { allowApplyWhileDirty?: boolean; silent?: boolean }) => {
+      if (!gapiReadyRef.current) return;
+      await gapiReadyRef.current;
 
-    setSyncStatus('connecting');
+      const allowApplyWhileDirty = options?.allowApplyWhileDirty ?? false;
+      const silent = options?.silent ?? false;
 
-    try {
-      const response = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: 'PIPELINE_DATA!A1',
-      });
+      if (!silent) setSyncStatus('connecting');
 
-      if (response?.result?.values && response.result.values[0]) {
-        const remoteData = JSON.parse(response.result.values[0][0]);
-        if (remoteData.cards) setCards(remoteData.cards);
-        if (remoteData.stages) setStages(remoteData.stages);
+      try {
+        const response = await gapi.client.sheets.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'PIPELINE_DATA!A1',
+        });
 
-        setSyncStatus('synced');
-        setLastSyncedAt(new Date());
-      } else {
-        await saveToSheet({ cards, stages });
-      }
-    } catch (err: any) {
-      console.error('Sheet Sync Failed:', err);
+        if (response?.result?.values && response.result.values[0]) {
+          const raw = response.result.values[0][0] as string;
+          const remote = parseRemoteBlob(raw);
 
-      const msg = err?.result?.error?.message || '';
+          if (!remote) {
+            // If parsing fails, do nothing.
+            if (!silent) setSyncStatus('error');
+            return;
+          }
 
-      // If sheet/tab doesn't exist, create the tab
-      // IMPORTANT: Google often returns 400 INVALID_ARGUMENT (unable to parse range)
-      // when the sheet/tab doesn't exist.
-      const looksLikeMissingTab =
-        err?.status === 404 ||
-        msg.toLowerCase().includes('not found') ||
-        msg.toLowerCase().includes('unable to parse range') ||
-        msg.toLowerCase().includes('invalid argument');
+          const remoteIsNewer = remote.updatedAt > lastRemoteUpdatedAtRef.current;
 
-      if (looksLikeMissingTab) {
-        try {
-          await gapi.client.sheets.spreadsheets.batchUpdate({
-            spreadsheetId: SPREADSHEET_ID,
-            resource: {
-              requests: [{ addSheet: { properties: { title: 'PIPELINE_DATA' } } }],
-            },
-          });
+          if (!remoteIsNewer) {
+            // Nothing new.
+            if (!silent) {
+              setSyncStatus('synced');
+              setLastSyncedAt(new Date());
+            }
+            return;
+          }
 
-          await saveToSheet({ cards, stages });
-        } catch (createErr) {
-          console.error('Failed creating PIPELINE_DATA sheet:', createErr);
+          // If we have local edits, don't auto-apply remote unless explicitly allowed.
+          const localDirty = hasLocalDirtyRef.current;
+          if (localDirty && !allowApplyWhileDirty) {
+            setHasRemoteUpdate(true);
+            setSyncStatus('conflict');
+            return;
+          }
+
+          // Apply remote
+          applyingRemoteRef.current = true;
+          setCards(remote.cards);
+          setStages(remote.stages);
+          applyingRemoteRef.current = false;
+
+          hasLocalDirtyRef.current = false;
+          lastRemoteUpdatedAtRef.current = remote.updatedAt;
+          setHasRemoteUpdate(false);
+
+          setSyncStatus('synced');
+          setLastSyncedAt(new Date());
+        } else {
+          // No data yet: initialize cloud from local.
+          const blob = buildRemoteBlob(cards, stages);
+          await saveToSheet(blob);
+        }
+      } catch (err: any) {
+        console.error('Sheet Pull Failed:', err);
+
+        const msg = err?.result?.error?.message || '';
+        const looksLikeMissingTab =
+          err?.status === 404 ||
+          msg.toLowerCase().includes('not found') ||
+          msg.toLowerCase().includes('unable to parse range') ||
+          msg.toLowerCase().includes('invalid argument');
+
+        if (looksLikeMissingTab) {
+          try {
+            await gapi.client.sheets.spreadsheets.batchUpdate({
+              spreadsheetId: SPREADSHEET_ID,
+              resource: {
+                requests: [{ addSheet: { properties: { title: 'PIPELINE_DATA' } } }],
+              },
+            });
+
+            const blob = buildRemoteBlob(cards, stages);
+            await saveToSheet(blob);
+          } catch (createErr) {
+            console.error('Failed creating PIPELINE_DATA sheet:', createErr);
+            setSyncStatus('error');
+          }
+        } else if (err?.status === 401 || err?.status === 403) {
+          setSyncStatus('unauthorized');
+        } else {
           setSyncStatus('error');
         }
-      } else if (err?.status === 401 || err?.status === 403) {
-        setSyncStatus('unauthorized');
-      } else {
-        setSyncStatus('error');
       }
-    }
-  }, [cards, stages, saveToSheet]);
+    },
+    [cards, stages, buildRemoteBlob, parseRemoteBlob, saveToSheet]
+  );
 
   // ----- INIT (GAPI + GIS) -----
   useEffect(() => {
+    // establish stable client id
+    const existing = localStorage.getItem('vidtrackr_client_id');
+    if (existing) clientIdRef.current = existing;
+    else {
+      const next = `client_${crypto.randomUUID().slice(0, 8)}`;
+      clientIdRef.current = next;
+      localStorage.setItem('vidtrackr_client_id', next);
+    }
+
     const savedCards = localStorage.getItem('video_funnel_tracker_cards');
     const savedStages = localStorage.getItem('video_funnel_tracker_stages');
 
@@ -280,7 +397,7 @@ const App: React.FC = () => {
       setCards([templateCard]);
     }
 
-    // If you never set a real client id, don't block UI on init; just leave disconnected.
+    // If client id is missing, leave disconnected.
     if (!CLIENT_ID || CLIENT_ID.includes('YOUR_CLIENT_ID')) {
       setIsGapiLoaded(false);
       setIsGapiReady(false);
@@ -296,12 +413,10 @@ const App: React.FC = () => {
         logInit('Starting init...');
         logInit('Initial globals', { hasGapi: hasGapi(), hasGIS: hasGIS() });
 
-        // 1) Wait for both scripts. If they never load (blocked/missing), we fail loudly.
         await withTimeout(waitForLibraries(12000), 13000, 'waitForLibraries');
 
         logInit('Libraries detected', { hasGapi: hasGapi(), hasGIS: hasGIS() });
 
-        // 2) Initialize gapi client. Add timeout so we never hang.
         gapiReadyRef.current = new Promise<void>((resolve, reject) => {
           gapi.load('client', async () => {
             try {
@@ -322,15 +437,17 @@ const App: React.FC = () => {
           });
         });
 
-        // 3) Initialize the token client (GIS)
-                tokenClientRef.current = google.accounts.oauth2.initTokenClient({
+        tokenClientRef.current = google.accounts.oauth2.initTokenClient({
           client_id: CLIENT_ID,
           scope: SCOPES,
           callback: async (response: any) => {
             if (response?.error) {
-              // Silent token attempts can return interaction_required; don't hard-fail the UI.
               const errStr = String(response?.error || '').toLowerCase();
-              if (errStr.includes('interaction_required') || errStr.includes('consent_required') || errStr.includes('login_required')) {
+              if (
+                errStr.includes('interaction_required') ||
+                errStr.includes('consent_required') ||
+                errStr.includes('login_required')
+              ) {
                 setSyncStatus('disconnected');
                 return;
               }
@@ -340,14 +457,11 @@ const App: React.FC = () => {
             }
 
             try {
-              // Ensure gapi is initialized.
               await gapiReadyRef.current;
-
-              // Set token for gapi client
               gapi.client.setToken(response);
 
-              // Immediately attempt to sync so UI can flip to "synced".
-              await handleSyncWithSheet();
+              // Pull latest on successful auth.
+              await pullFromSheet({ silent: false, allowApplyWhileDirty: true });
             } catch (e) {
               console.error('Auth callback failed:', e);
               setSyncStatus('error');
@@ -355,8 +469,7 @@ const App: React.FC = () => {
           },
         });
 
-        // Try a SILENT token request on load (auto-read on page load when already consented)
-        // If the user hasn't granted consent yet, this will no-op and leave button available.
+        // Silent auth attempt: if already consented, we auto-connect and pull.
         try {
           tokenClientRef.current.requestAccessToken({ prompt: '' });
         } catch {
@@ -367,7 +480,6 @@ const App: React.FC = () => {
       } catch (err: any) {
         console.error('GAPI sequence failed:', err);
 
-        // Helpful, explicit reasons
         const msg = String(err?.message || err || '');
         if (msg.toLowerCase().includes('libraries not loaded')) {
           setSyncStatus('init_missing_scripts');
@@ -383,23 +495,47 @@ const App: React.FC = () => {
     };
 
     init();
-  }, []);
+  }, [pullFromSheet]);
 
   // Persist locally + autosave to Sheet (if connected)
   useEffect(() => {
     localStorage.setItem('video_funnel_tracker_cards', JSON.stringify(cards));
     localStorage.setItem('video_funnel_tracker_stages', JSON.stringify(stages));
 
+    // Mark local dirty if this change came from the user (not from remote pull)
+    if (!applyingRemoteRef.current) {
+      hasLocalDirtyRef.current = true;
+      lastLocalEditAtRef.current = Date.now();
+    }
+
     if (syncStatus === 'synced' || syncStatus === 'syncing') {
       if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = window.setTimeout(() => {
-        saveToSheet({ cards, stages });
+        // If a remote update is pending and we are dirty, don't auto-overwrite.
+        if (hasRemoteUpdate && hasLocalDirtyRef.current) {
+          setSyncStatus('conflict');
+          return;
+        }
+        const blob = buildRemoteBlob(cards, stages);
+        saveToSheet(blob);
       }, 3000);
     }
-  }, [cards, stages, syncStatus, saveToSheet]);
+  }, [cards, stages, syncStatus, saveToSheet, buildRemoteBlob, hasRemoteUpdate]);
+
+  // Poll for updates while connected.
+  useEffect(() => {
+    if (syncStatus !== 'synced') return;
+
+    const t = window.setInterval(() => {
+      // If we are already in conflict, don't spam pulls.
+      if (syncStatus === 'conflict') return;
+      pullFromSheet({ silent: true, allowApplyWhileDirty: false });
+    }, POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(t);
+  }, [syncStatus, pullFromSheet]);
 
   const connectToDrive = () => {
-    // Hard guard: don't even try if not ready.
     if (!isGapiReady) {
       alert(
         'Google API is not ready. If this keeps happening, your browser may be blocking Google scripts (adblock/privacy), or index.html is missing required script tags.'
@@ -506,7 +642,34 @@ const App: React.FC = () => {
       );
     }
 
-    // Show explicit init errors instead of permanent “Initializing…”
+    if (syncStatus === 'conflict') {
+      return (
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 text-amber-600">
+            <AlertTriangle size={14} />
+            <span className="text-[10px] font-bold uppercase tracking-tight">Team update detected</span>
+          </div>
+          <button
+            onClick={() => pullFromSheet({ allowApplyWhileDirty: true, silent: false })}
+            className="px-3 py-2 rounded-xl text-[10px] font-bold uppercase border bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+            title="Load team updates (may discard your unsaved local changes)"
+          >
+            Load Updates
+          </button>
+          <button
+            onClick={() => {
+              const blob = buildRemoteBlob(cards, stages);
+              saveToSheet(blob);
+            }}
+            className="px-3 py-2 rounded-xl text-[10px] font-bold uppercase border bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
+            title="Overwrite the team sheet with your current view"
+          >
+            Overwrite
+          </button>
+        </div>
+      );
+    }
+
     const initErrorLabel =
       syncStatus === 'init_missing_scripts'
         ? 'Google scripts blocked/missing'

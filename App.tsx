@@ -522,13 +522,13 @@ const App: React.FC = () => {
     }
   }, [cards, stages, syncStatus, saveToSheet, buildRemoteBlob, hasRemoteUpdate]);
 
-  // Poll for updates while connected.
+    // Poll for updates while connected.
+  // NOTE: inside this effect, syncStatus is narrowed to 'synced', so don't compare it to other literals.
+  // If we enter a conflict state, this effect will be torn down and the interval cleared.
   useEffect(() => {
     if (syncStatus !== 'synced') return;
 
     const t = window.setInterval(() => {
-      // If we are already in conflict, don't spam pulls.
-      if (syncStatus === 'conflict') return;
       pullFromSheet({ silent: true, allowApplyWhileDirty: false });
     }, POLL_INTERVAL_MS);
 

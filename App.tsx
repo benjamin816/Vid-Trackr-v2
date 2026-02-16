@@ -58,12 +58,6 @@ declare global {
     google: any;
   }
 }
-/**
- * Google APIs are loaded via script tags at runtime.
- * These declarations tell TypeScript the globals exist.
- */
-declare const gapi: any;
-declare const google: any;
 
 function isSpreadsheetConfigured() {
   return !!SPREADSHEET_ID && !SPREADSHEET_ID.includes('YOUR_SHEET_ID_HERE');
@@ -824,13 +818,17 @@ export default function App() {
   const activeCard = useMemo(() => cards.find((c) => c.id === selectedCardId), [cards, selectedCardId]);
 
   const renderSyncStatus = () => {
-    if (syncStatus === 'synced') {
+    // Only show "connected" once the sheet has actually synced at least once.
+    // We treat syncing as connected too, but we never change the text to avoid UI flicker.
+    const isConnected = syncStatus === 'synced' || syncStatus === 'syncing';
+
+    if (isConnected) {
       return (
         <div className="flex flex-col items-end">
           <div className="flex items-center gap-1.5 text-emerald-600">
             <ShieldCheck size={14} />
             <span className="text-[10px] font-bold uppercase tracking-tight">
-              Team Sheet Connected {isLeader ? '(Leader)' : leaderId ? '(Follower)' : ''}
+              Team Sheet Connected
             </span>
           </div>
           {lastSyncedAt && (
@@ -838,15 +836,6 @@ export default function App() {
               Last sync: {lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           )}
-        </div>
-      );
-    }
-
-    if (syncStatus === 'syncing' || syncStatus === 'connecting') {
-      return (
-        <div className="flex items-center gap-2 text-blue-500">
-          <Table size={14} className="animate-spin" />
-          <span className="text-[10px] font-bold uppercase tracking-tight">Updating Cloud...</span>
         </div>
       );
     }
